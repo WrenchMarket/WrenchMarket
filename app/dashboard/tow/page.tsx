@@ -1,141 +1,228 @@
 "use client";
-import { useEffect, useState } from "react";
+
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 
-export default function TowDash() {
-  const [msg, setMsg] = useState("");
-  const [city, setCity] = useState("");
-  const [requests, setRequests] = useState<any[]>([]);
-  const [myOffers, setMyOffers] = useState<any[]>([]);
+type TowRequest = {
+  id: string;
+  created_at: string;
+  status: "open" | "chosen" | "closed" | "cancelled";
+  city: string;
+  from_address: string;
+  to_address: string;
+  car_type: string;
+  can_roll: boolean;
+  note: string | null;
+};
 
-  const [price, setPrice] = useState("");
-  const [eta, setEta] = useState("25");
-  const [comment, setComment] = useState("");
-  const [selectedReq, setSelectedReq] = useState<string>("");
+export default function TowDashboardPage() {
+  const [userReady, setUserReady] = useState(false);
+  const [role, setRole] = useState<string | null>(null);
 
-  async function loadAll() {
-    const { data: u } = await supabase.auth.getUser();
-    if (!u.user) { location.href = "/auth"; return; }
+  const [requests, setRequests] = useState<TowRequest[]>([]);
+  const [q, setQ] = useState("");
 
-    const { data: p } = await supabase.from("profiles").select("*").eq("id", u.user.id).maybeSingle();
-    if (p?.role !== "tow") { setMsg("Поставь роль Эвакуаторщик в кабинете."); return; }
-    setCity(p?.city ?? "");
+  // форма оффера
+  const [selectedRequestId, setSelectedRequestId] = useState<string>("");
+  const [price, setPrice] = useState<string>("");
+  const [eta, setEta] = useState<string>("");
+  const [comment, setComment] = useState<string>("");
 
-    const { data: r } = await supabase.from("tow_requests").select("*").order("created_at", {ascending:false});
-    const list = (r ?? []).filter((x:any)=>!p?.city || x.city === p.city);
-    setRequests(list);
+  const [msg, setMsg] = useState<string>("");
 
-    const { data: o } = await supabase.from("tow_offers").select("*").eq("tow_profile_id", u.user.id).order("created_at", {ascending:false});
-    setMyOffers(o ?? []);
+  useEffect(() => {
+    (async () => {
+      const { data: u } = await supabase.auth.getUser();
+      if (!u.user) {
+        location.href = "/auth";
+        return;
+      }
+
+      const { data: p } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", u.user.id)
+        .maybeSingle();
+
+      setRole((p as any)?.role ?? null);
+      setUserReady(true);
+    })();
+  }, []);
+
+  async function loadRequests() {
+    setMsg("");
+    const { data, error } = await supabase
+      .from("tow_requests")
+      .select("id,created_at,status,city,from_address,to_address,car_type,can_roll,note")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setRequests((data as any) ?? []);
+    if (!selectedRequestId && data && data.length) setSelectedRequestId((data as any)[0].id);
   }
 
-  useEffect(() => { loadAll(); }, []);
+  useEffect(() => {
+    if (userReady && role === "tow") loadRequests();
+  }, [userReady, role]);
 
-  async function makeOffer() {
-    try {
-      setMsg("");
-      const { data: u } = await supabase.auth.getUser();
-      if (!u.user) return;
-      if (!selectedReq) throw new Error("Выбери заявку");
-      if (!price || !eta) throw new Error("Укажи цену и время подачи");
+  const filtered = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return requests;
+    return requests.filter((r) => {
+      const text = `${r.city} ${r.from_address} ${r.to_address} ${r.car_type} ${r.note ?? ""}`.toLowerCase();
+      return text.includes(s);
+    });
+  }, [requests, q]);
 
-      const { error } = await supabase.from("tow_offers").insert({
-        request_id: selectedReq,
-        tow_profile_id: u.user.id,
-        price: Number(price),
-        eta_minutes: Number(eta),
-        comment: comment || null
-      });
-      if (error) throw error;
+  async function sendOffer() {
+    setMsg("");
 
-      setMsg("Предложение отправлено.");
-      setPrice(""); setComment("");
-      await loadAll();
-    } catch (e:any) {
-      setMsg(e.message ?? "Ошибка");
+    const { data: u } = await supabase.auth.getUser();
+    if (!u.user) {
+      location.href = "/auth";
+      return;
     }
+
+    if (!selectedRequestId) {
+      setMsg("Выбери заявку");
+      return;
+    }
+
+    const priceNum = parseInt(price, 10);
+    const etaNum = parseInt(eta, 10);
+
+    if (!Number.isFinite(priceNum) || priceNum <= 0) {
+      setMsg("Цена должна быть числом");
+      return;
+    }
+    if (!Number.isFinite(etaNum) || etaNum <= 0) {
+      setMsg("Время подачи (мин) должно быть числом");
+      return;
+    }
+
+    const payload = {
+      request_id: selectedRequestId,
+      tow_profile_id: u.user.id,
+      price: priceNum,
+      eta_minutes: etaNum,
+      comment: comment.trim() || null
+    };
+
+    const { error } = await supabase.from("tow_offers").insert(payload as any);
+    if (error) {
+      setMsg(error.message);
+      return;
+    }
+
+    setMsg("Предложение отправлено ✅");
+    setPrice("");
+    setEta("");
+    setComment("");
+  }
+
+  if (!userReady) {
+    return (
+      <div className="card">
+        <div style={{ fontWeight: 900, fontSize: 20 }}>Эвакуатор</div>
+        <div className="small" style={{ marginTop: 10 }}>Загрузка...</div>
+      </div>
+    );
+  }
+
+  if (role !== "tow") {
+    return (
+      <div className="card">
+        <div style={{ fontWeight: 900, fontSize: 20 }}>Эвакуатор</div>
+        <div className="small" style={{ marginTop: 10 }}>
+          Эта страница только для роли "Эвакуаторщик".
+        </div>
+      </div>
+    );
   }
 
   return (
-    <div className="grid" style={{gap:18}}>
+    <div className="grid" style={{ gap: 16 }}>
       <div className="card">
-        <div style={{fontWeight:900, fontSize:22}}>Панель эвакуаторщика</div>
-        <div className="small">Город из профиля: {city || "не задан"}</div>
-        {msg ? <div className="small" style={{marginTop:10}}>{msg}</div> : null}
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontWeight: 900, fontSize: 22 }}>Заявки на эвакуатор</div>
+            <div className="small">Выбирай заявку и отправляй своё предложение</div>
+          </div>
+          <button className="btn2" onClick={loadRequests}>Обновить</button>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <div className="small">Поиск</div>
+          <input
+            className="input"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="город, адрес, тип авто..."
+          />
+        </div>
+
+        <div className="hr" />
+
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Статус</th>
+              <th>Город</th>
+              <th>Откуда</th>
+              <th>Куда</th>
+              <th>Авто</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r) => (
+              <tr key={r.id}>
+                <td>{r.status}</td>
+                <td>{r.city}</td>
+                <td>{r.from_address}</td>
+                <td>{r.to_address}</td>
+                <td>{r.car_type}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {msg ? <div className="small" style={{ marginTop: 12 }}>{msg}</div> : null}
       </div>
 
       <div className="card">
-        <div style={{fontWeight:900}}>Сделать предложение</div>
-        <div className="hr" />
-        <div className="grid grid2">
+        <div style={{ fontWeight: 900, fontSize: 20 }}>Отправить предложение</div>
+
+        <div style={{ marginTop: 12 }}>
+          <div className="small">Заявка</div>
+          <select
+            className="select"
+            value={selectedRequestId}
+            onChange={(e) => setSelectedRequestId(e.target.value)}
+          >
+            <option value="">Выбери заявку</option>
+            {requests.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.city} | {r.car_type} | {r.from_address.slice(0, 18)}...
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="grid grid2" style={{ marginTop: 12 }}>
           <div>
-            <div className="small">Заявка</div>
-            <select className="select" value={selectedReq} onChange={e=>setSelectedReq(e.target.value)}>
-              <option value="">Выбери</option>
-              {requests.filter(r=>r.status==="open").map((r:any)=>(
-                <option key={r.id} value={r.id}>
-                  {r.city} · {r.car_type} · {r.from_address} -> {r.to_address}
-                </option>
-              ))}
-            </select>
+            <div className="small">Цена (руб.)</div>
+            <input className="input" value={price} onChange={(e) => setPrice(e.target.value)} placeholder="например: 4500" />
           </div>
           <div>
-            <div className="small">Цена</div>
-            <input className="input" value={price} onChange={e=>setPrice(e.target.value)} placeholder="3000" />
-          </div>
-          <div>
-            <div className="small">Подача (мин)</div>
-            <input className="input" value={eta} onChange={e=>setEta(e.target.value)} placeholder="25" />
-          </div>
-          <div>
-            <div className="small">Комментарий</div>
-            <input className="input" value={comment} onChange={e=>setComment(e.target.value)} placeholder="могу приехать быстрее" />
+            <div className="small">Подача (мин.)</div>
+            <input className="input" value={eta} onChange={(e) => setEta(e.target.value)} placeholder="например: 25" />
           </div>
         </div>
-        <div style={{marginTop:12}} className="row">
-          <button className="btn" onClick={makeOffer}>Отправить</button>
-        </div>
-      </div>
 
-      <div className="card">
-        <div style={{fontWeight:900}}>Открытые заявки в моём городе</div>
-        <div className="hr" />
-        {requests.filter(r=>r.status==="open").length === 0 ? <div className="small">Пока нет.</div> : (
-          <table className="table">
-            <thead><tr><th>Создано</th><th>Маршрут</th><th>Авто</th><th>Катится</th></tr></thead>
-            <tbody>
-              {requests.filter(r=>r.status==="open").map((r:any)=>(
-                <tr key={r.id}>
-                  <td>{new Date(r.created_at).toLocaleString("ru-RU")}</td>
-                  <td>{r.from_address} -> {r.to_address}</td>
-                  <td>{r.car_type}</td>
-                  <td>{r.can_roll ? "да" : "нет"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      <div className="card">
-        <div style={{fontWeight:900}}>Мои предложения</div>
-        <div className="hr" />
-        {myOffers.length === 0 ? <div className="small">Пока пусто.</div> : (
-          <table className="table">
-            <thead><tr><th>Создано</th><th>Цена</th><th>Подача</th><th>Выбрано</th></tr></thead>
-            <tbody>
-              {myOffers.map((o:any)=>(
-                <tr key={o.id}>
-                  <td>{new Date(o.created_at).toLocaleString("ru-RU")}</td>
-                  <td>{o.price}</td>
-                  <td>{o.eta_minutes} мин</td>
-                  <td>{o.is_selected ? "да" : "нет"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  );
-}
+        <div style={{ marginTop: 12 }}>
+          <div className="small">Комментарий (необязательно)</div>
+          <textarea className="textar
